@@ -1,4 +1,7 @@
+import { randomBytes } from "node:crypto";
 import {
+  formatTraceparent,
+  parseTraceparent,
   buildCodexAppServerTurnWorkflowId,
   buildRoomAgentSupervisorWorkflowId,
   roomAgentSupervisorQueueItemSchema,
@@ -120,6 +123,12 @@ maxMissionTokens: number | null = DEFAULT_ROOM_AGENT_MAX_MISSION_TOKENS): Promis
     "If the entire request is already verified, emit the space-room-verification block with version 1, status VERIFIED and summary.",
     "Otherwise execute only the remaining work; do not infer completion from zero plans or idle panes."
   ].join("\n");
+  const sourceTraceparent = parseTraceparent(source.queueItem.turn.traceparent);
+  // The continuation is its own trace (trace:bg-<id>) that links back to the span it continues.
+  const traceContext = sourceTraceparent
+    ? { traceparent: formatTraceparent(randomBytes(16).toString("hex"), randomBytes(8).toString("hex"), sourceTraceparent.flags),
+        continuesTraceparent: formatTraceparent(sourceTraceparent.traceId, sourceTraceparent.parentId, sourceTraceparent.flags) }
+    : {};
   const prefix = `${instructions}\n\nOperator request:\n${request}\n\nSettled action results (bounded; inspect for details):\n`;
   const prompt = prefix + continuationEvidence(actions, Math.max(0, 8000 - prefix.length));
   const item = roomAgentSupervisorQueueItemSchema.parse({ missionId: input.missionId, turn: {
@@ -130,7 +139,7 @@ maxMissionTokens: number | null = DEFAULT_ROOM_AGENT_MAX_MISSION_TOKENS): Promis
     agentUserMessageId: `agent_msg:bg-context-${input.continuationId}`,
     agentAssistantMessageId: `agent_msg:bg-response-${input.continuationId}`,
     // Resolve the current native thread from the durable session when executing.
-    agentThreadId: null, traceId: `trace:bg-${input.continuationId}`
+    agentThreadId: null, traceId: `trace:bg-${input.continuationId}`, ...traceContext
   } });
   try {
     const enqueued = await store.enqueueRoomAgentMission({

@@ -52,3 +52,23 @@ background work, and is hidden in the web app. Public installs upgraded from
 1.1.x that used Job Copilot, the games, channels, Telegram or the desktop
 routes set the modules they keep, for example
 `SPACE_OPTIONAL_MODULES=job-copilot,games`.
+
+## OTLP span export
+
+`SPACE_OTEL_EXPORTER_OTLP_ENDPOINT` is read by the API and by every Temporal
+worker process (`space-worker`, `space-memory-maintenance-worker`,
+`space-memory-mutation-worker`). It is a collector base URL such as
+`http://127.0.0.1:4318`; spans are posted as OTLP/HTTP JSON to
+`<endpoint>/v1/traces`. Unset, empty or invalid (credentials, query or fragment
+in the URL), export is off and nothing is added to the process or to workflows.
+
+With it set, one API request that starts work on Temporal gives one trace: the
+API SERVER span, a span for each workflow run (child workflows nest under their
+parent), and one span per activity attempt. A continue-as-new run and a Room
+Agent background continuation carry an OTLP span link to the run or trace they
+continue. Spans carry only ids (trace, workflow, run, room, pane, mission),
+workflow and activity type, attempt, status, error code and category, and
+duration; prompts, model output, paths, URLs and error messages are never
+exported. Export is best effort: a bounded queue drops (and counts) spans, each
+POST times out, and a slow or failing collector never delays or fails work.
+See [observability](quality/observability.md#traces-w3c-trace-context).

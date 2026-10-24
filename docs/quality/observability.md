@@ -220,8 +220,30 @@ SERVER span per API request when `SPACE_OTEL_EXPORTER_OTLP_ENDPOINT` is set (no
 OpenTelemetry dependency; `packages/runtime/src/otlp-span-exporter.ts`). Since
 2026-10-16 the worker and both memory workers use the same exporter (services
 `space-worker`, `space-memory-maintenance-worker`, `space-memory-mutation-worker`):
-one INTERNAL span per activity whose input carries a `traceparent`, as a child of
-that span, with the activity type, outcome and attempt only.
+one INTERNAL span per activity attempt, with the activity type, outcome, attempt,
+`reasonCode` / `category` and duration. The workers also export one INTERNAL span
+per workflow run, so one API request gives one connected trace: API SERVER span,
+workflow span (parent = the propagated `traceparent` span, which is the API
+request's own span), child workflow spans under their parent workflow, and
+activity spans under their workflow span.
+- **How:** Temporal interceptors, no tracing dependency. The workflow
+  interceptor (`apps/worker/src/workflow-interceptors.ts`) does no I/O: it
+  computes ids with the deterministic `uuid4` and workflow time, puts the trace
+  context into a Temporal header for activities, child workflows and
+  continue-as-new, and hands one plain record per run to a sink. The sink
+  (`workflow-span-sinks.ts`) is registered with `callDuringReplay: false`, so
+  replay never exports a span again. A workflow span is exported when the run
+  ends (completes, fails, is cancelled or continues as new), so a long-running
+  workflow shows up when it finishes.
+- **Links:** a continue-as-new run links to the previous run's span; a Room
+  Agent background continuation (`trace:bg-<id>`) is its own trace and links to
+  the span it continues (`continuesTraceparent` in the turn input).
+- **Attributes** come from an allowlist (`apps/worker/src/span-attributes.ts`):
+  trace, workflow, run, room, pane and mission ids, workflow and activity type,
+  attempt, status or outcome, `reasonCode`, `category` and duration. Prompts,
+  model output, paths, URLs and error messages are never exported.
+- Workflows started without a `traceparent` (for example the scheduled memory
+  maintenance) produce no spans.
 - **API:** a valid inbound `traceparent` is continued (same trace ID, new span).
   An invalid or missing header gets a new trace ID. Every API log line carries
   `w3cTraceId` (Fastify `childLoggerFactory`).
@@ -336,9 +358,11 @@ No credential or transcript export was added.
   the lookup also returns the Space-native agent runs (`space_agent_runs`) of the
   trace's workflows, joined by workflow id, with their status and error code, and
   names a failed run's code as the cause when no event carries one.
-- **Hosts emit no spans.** Since 2026-10-16 the OTLP exporter sends API SERVER
-  spans and worker activity spans (the worker and both memory workers); the CLI
-  and Browser Hosts still join traces through log lines only.
+- **Hosts emit no spans.** The OTLP exporter sends API SERVER spans and worker
+  workflow and activity spans (the worker and both memory workers); the CLI and
+  Browser Hosts still join traces through log lines only. A workflow span is
+  exported when its run ends, and a background continuation is a separate trace
+  joined to its source by a span link, not by parentage.
 - **Recovery counters are partial.** Recovery counters exist for plan model
   retries, CLI terminal reconnects and worker activity retries only.
 - **Worker endpoints are not scraped yet.** Stable's `deploy/space-worker.service`

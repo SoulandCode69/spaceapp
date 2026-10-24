@@ -7,9 +7,11 @@ import {
   formatTraceparent,
   isSafeErrorCode,
   parseTraceparent,
-  traceIdFromTraceparent,
   type FailureCategory
 } from "@space/contracts";
+import { allowlistedSpanAttributes, correlationSpanAttributes } from "./span-attributes.js";
+import { activityCorrelation, argumentTraceparent } from "./trace-correlation.js";
+import { TRACEPARENT_HEADER, decodeTraceHeader } from "./trace-propagation.js";
 import type { SpanExporter } from "@space/runtime";
 import { logIdentifier, workerLog, type WorkerLogValue } from "./worker-log.js";
 import { workerMetrics, type WorkerMetrics } from "./worker-metrics.js";
@@ -64,56 +66,7 @@ export function childTraceparent(traceparent: string | null | undefined): string
   return formatTraceparent(parsed.traceId, spanId, parsed.flags);
 }
 
-// Keys whose values are identifiers. Prompts, content and messages are never read.
-const correlationKeys = [
-  "traceId",
-  "traceparent",
-  "requestId",
-  "roomId",
-  "paneId",
-  "missionId",
-  "roomAgentMissionId",
-  "agentRunId",
-  "agentSessionId",
-  "actionId",
-  "goalId",
-  "dotId",
-  "turnId",
-  "cliTaskId",
-  "revisionId"
-] as const;
-const nestedKeys = ["turn", "item", "bridge", "input", "turnInput"] as const;
-
-type CorrelationKey = (typeof correlationKeys)[number];
-
-function readCorrelation(value: unknown, into: Partial<Record<CorrelationKey, string>>, depth: number): void {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const record = value as Record<string, unknown>;
-  for (const key of correlationKeys) {
-    if (into[key] !== undefined) continue;
-    const identifier = logIdentifier(record[key]);
-    if (identifier !== null) into[key] = identifier;
-  }
-  if (depth <= 0) return;
-  for (const key of nestedKeys) readCorrelation(record[key], into, depth - 1);
-}
-
-/** Allowlisted correlation fields from activity arguments (identifiers only). */
-export function activityCorrelation(args: readonly unknown[]): Record<string, string> {
-  const found: Partial<Record<CorrelationKey, string>> = {};
-  for (const arg of args) readCorrelation(arg, found, 2);
-  const correlation: Record<string, string> = {};
-  if (found.traceId) correlation.traceId = found.traceId;
-  const w3cTraceId = traceIdFromTraceparent(found.traceparent);
-  if (w3cTraceId) correlation.w3cTraceId = w3cTraceId;
-  if (found.requestId && found.requestId !== found.traceId) correlation.parentTraceId = found.requestId;
-  const missionId = found.missionId ?? found.roomAgentMissionId;
-  if (missionId) correlation.missionId = missionId;
-  for (const key of ["roomId", "paneId", "agentRunId", "agentSessionId", "actionId", "goalId", "dotId", "turnId", "cliTaskId", "revisionId"] as const) {
-    if (found[key]) correlation[key] = found[key]!;
-  }
-  return correlation;
-}
+export { activityCorrelation };
 
 function errorCodeOf(error: unknown): string {
   const record = error as { code?: unknown; type?: unknown; name?: unknown } | null;
@@ -137,12 +90,8 @@ export interface ObserveActivityDependencies {
   cancelled?: () => boolean;
   /** OTLP export (SPACE_OTEL_EXPORTER_OTLP_ENDPOINT): one span per activity whose input carries a traceparent. */
   spans?: SpanExporter | null;
-}
-
-function activityTraceparent(args: readonly unknown[]) {
-  const found: Partial<Record<CorrelationKey, string>> = {};
-  for (const arg of args) readCorrelation(arg, found, 2);
-  return parseTraceparent(found.traceparent);
+  /** traceparent the workflow interceptor propagated in a Temporal header (the workflow span). */
+  traceparentHeader?: string | null;
 }
 
 export async function observeActivityExecution<T>(
@@ -194,19 +143,36 @@ export async function observeActivityExecution<T>(
       queueMs,
       rssBytes: process.memoryUsage().rss
     });
-    const parent = dependencies.spans ? activityTraceparent(args) : null;
+    // The workflow interceptor's header names the workflow span; without it
+    // (workflow tracing off) the API's traceparent in the input is the parent.
+    const parent = dependencies.spans ? parseTraceparent(dependencies.traceparentHeader) ?? argumentTraceparent(args) : null;
     if (parent) {
-      dependencies.spans!.record({
-        traceId: parent.traceId,
-        spanId: randomBytes(8).toString("hex"),
-        parentSpanId: parent.parentId,
-        name: `activity ${activityType}`,
-        startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
-        endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
-        attributes: { "space.activity_type": activityType, "space.outcome": outcome, "space.attempt": info.attempt },
-        error: outcome === "FAILED" || outcome === "FAILED_RESULT",
-        kind: 1
-      });
+      try {
+        dependencies.spans!.record({
+          traceId: parent.traceId,
+          spanId: randomBytes(8).toString("hex"),
+          parentSpanId: parent.parentId,
+          name: `activity ${activityType}`,
+          startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
+          endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
+          attributes: allowlistedSpanAttributes({
+            ...correlationSpanAttributes(activityCorrelation(args)),
+            "space.workflow_id": info.workflowExecution?.workflowId,
+            "space.run_id": info.workflowExecution?.runId,
+            "space.workflow_type": info.workflowType,
+            "space.activity_type": activityType,
+            "space.attempt": info.attempt,
+            "space.outcome": outcome,
+            "space.reason_code": reasonCode,
+            "space.category": category,
+            "space.duration_ms": durationMs
+          }),
+          error: outcome === "FAILED" || outcome === "FAILED_RESULT",
+          kind: 1
+        });
+      } catch {
+        // Tracing must never change an activity's outcome.
+      }
     }
   };
 
@@ -229,6 +195,7 @@ export function createActivityObservabilityInterceptors(dependencies: Omit<Obser
     inbound: {
       execute: (input, next) => observeActivityExecution(context.info, input.args, () => next(input), {
         ...dependencies,
+        traceparentHeader: decodeTraceHeader(input.headers, TRACEPARENT_HEADER),
         cancelled: () => context.cancellationSignal.aborted
       })
     }

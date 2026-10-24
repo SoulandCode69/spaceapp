@@ -4,8 +4,9 @@
  * `<base>/v1/traces`). No dependency, no collector required: Space logs stay
  * joinable by W3C trace id without it.
  *
- * Spans carry only the method, route template, status code, service name and
- * Space request id; never URLs with parameters, headers, bodies or user data.
+ * Spans carry only the method, route template, status code, service name,
+ * identifiers, types, attempt, outcome and error code (see the worker's span
+ * attribute allowlist); never URLs with parameters, headers, bodies or user data.
  * Export is best effort: a bounded queue drops (and counts) spans instead of
  * growing, each POST has a timeout, and a failing collector never affects a
  * request.
@@ -22,6 +23,8 @@ export interface ServerSpan {
   error: boolean;
   /** OTLP span kind; SERVER (2) unless given. Worker activities use INTERNAL (1). */
   kind?: number;
+  /** OTLP span links: continue-as-new runs and background continuations link to what they continue. */
+  links?: readonly { traceId: string; spanId: string }[];
 }
 
 export interface SpanExporterStats {
@@ -82,6 +85,7 @@ export function otlpTraceRequest(spans: readonly ServerSpan[], serviceName: stri
           ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
           name: span.name,
           kind: span.kind ?? 2,
+          ...(span.links?.length ? { links: span.links.map(link => ({ traceId: link.traceId, spanId: link.spanId })) } : {}),
           startTimeUnixNano: span.startTimeUnixNano.toString(),
           endTimeUnixNano: span.endTimeUnixNano.toString(),
           attributes: Object.entries(span.attributes).map(([key, value]) => ({ key, value: attributeValue(value) })),
