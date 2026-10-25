@@ -7253,11 +7253,15 @@ export const memoryGraphPayloadSchema = z.object({
   months: z.array(z.string().max(7)).default([])
 });
 
+/** Hard server maximum for the overview `limit`; edges are capped at three times the node limit. */
+export const MEMORY_GRAPH_OVERVIEW_MAX_NODES = 50000;
+export const MEMORY_GRAPH_OVERVIEW_DEFAULT_NODES = 2000;
+
 export const memoryGraphOverviewPayloadSchema = memoryGraphPayloadSchema
   .omit({ nodes: true, edges: true })
   .extend({
-    nodes: z.array(memoryGraphNodeSchema).max(2000),
-    edges: z.array(memoryGraphEdgeSchema).max(6000),
+    nodes: z.array(memoryGraphNodeSchema).max(MEMORY_GRAPH_OVERVIEW_MAX_NODES),
+    edges: z.array(memoryGraphEdgeSchema).max(MEMORY_GRAPH_OVERVIEW_MAX_NODES * 3),
     totalMatchingNodes: z.number().int().min(0),
     totalMatchingEdges: z.number().int().min(0),
     truncated: z.boolean()
@@ -7288,6 +7292,8 @@ export const listMemoryGraphOverviewQuerySchema = listMemoryGraphQuerySchema.omi
   pageSize: true,
   sortBy: true,
   sortOrder: true
+}).extend({
+  limit: z.coerce.number().int().min(1).max(MEMORY_GRAPH_OVERVIEW_MAX_NODES).default(MEMORY_GRAPH_OVERVIEW_DEFAULT_NODES)
 });
 
 export const memoryCalendarQuerySchema = z.object({

@@ -53,6 +53,7 @@ import { DEMO_LOCAL_REPLY, SpaceApiError } from "../runtime/SpaceRuntime.js";
 import { CLI_RUNTIME_PRESENTATIONS, cliRuntimeLabel } from "../cli-runtime-presentation.js";
 import { createDemoFixture, DEMO_FIXED_AT, type DemoFixture } from "./demo-fixture.js";
 import { MockServices } from "./mock-services.js";
+import { createSyntheticMemoryGraph, syntheticMemoryNodeCount } from "./synthetic-memory-graph.js";
 import { getCliMockTranscript, getCliMockModel, getCliMockCwd, getCliMockDefinition } from "./mock-cli-transcripts.js";
 
 export const DEMO_WARNING = "DEMO MODE — Everything is simulated locally. No production service is connected.";
@@ -146,6 +147,7 @@ type DemoMemoryGraphQuery = {
   lifecycleStatus?: "ACTIVE" | "ARCHIVED";
   month?: string;
   relationMode?: "CLUSTERED" | "RELATIONS";
+  limit?: number;
   page?: number;
   pageSize?: number;
 };
@@ -1496,7 +1498,28 @@ export class DemoStore {
         });
       }
       case "memoryGraphOverview": {
-        const graph = this.memoryGraph((args[0] ?? {}) as DemoMemoryGraphQuery);
+        const query = (args[0] ?? {}) as DemoMemoryGraphQuery;
+        const graph = this.memoryGraph(query);
+        // `?memoryNodes=N` swaps in a synthetic archive so the 3D benchmark needs no backend.
+        const synthetic = syntheticMemoryNodeCount(globalThis.location?.search ?? "");
+        if (synthetic > 0 && !query.q) {
+          const full = createSyntheticMemoryGraph(synthetic);
+          const limit = query.limit ?? 2000;
+          const nodes = full.nodes.slice(0, limit);
+          const ids = new Set(nodes.map((node) => node.id));
+          const edges = full.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)).slice(0, limit * 3);
+          return Promise.resolve({
+            data: {
+              ...graph,
+              summary: { ...graph.summary, sourceCount: nodes.filter((node) => node.type === "SOURCE").length, recordCount: full.nodes.filter((node) => node.type === "MEMORY").length, nodeCount: full.nodes.length, edgeCount: full.edges.length },
+              nodes,
+              edges,
+              totalMatchingNodes: full.nodes.length,
+              totalMatchingEdges: full.edges.length,
+              truncated: nodes.length !== full.nodes.length || edges.length !== full.edges.length
+            }
+          });
+        }
         return Promise.resolve({ data: { ...graph, totalMatchingNodes: graph.nodes.length, totalMatchingEdges: graph.edges.length, truncated: false } });
       }
       case "memoryCalendar": {
@@ -1575,6 +1598,10 @@ export class DemoStore {
       case "memoryConsolidation": return Promise.resolve(structuredClone(this.fixture.memoryWorkspace.maintenanceDetail));
       case "memoryGraphNode": {
         const detail = this.fixture.memoryWorkspace.nodeDetails[roomId ?? ""];
+        const syntheticNode = !detail && roomId?.startsWith("synthetic:")
+          ? createSyntheticMemoryGraph(syntheticMemoryNodeCount(globalThis.location?.search ?? "")).nodes.find((node) => node.id === roomId)
+          : undefined;
+        if (syntheticNode) return Promise.resolve({ node: syntheticNode, record: null, relatedNodes: [], relatedEdges: [], issues: [] });
         if (!detail) throw new SpaceApiError("Memory node not found.", { status: 404, code: "NOT_FOUND" });
         return Promise.resolve(structuredClone(detail));
       }

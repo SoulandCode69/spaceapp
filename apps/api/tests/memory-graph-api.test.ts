@@ -434,6 +434,37 @@ describe("Memory graph API", () => {
     await app.close();
   });
 
+  it("returns more than 2,000 overview nodes on request, up to a hard maximum", async () => {
+    const graphSnapshot = snapshot() as MemoryGraphSnapshot;
+    graphSnapshot.nodes = Array.from({ length: 2600 }, (_, index) => ({ id: `memory:${String(index).padStart(4, "0")}`, type: "MEMORY" as const, label: `Memory ${index} token=raw-node-value`, sourcePath: null, recordId: null }));
+    graphSnapshot.edges = Array.from({ length: 2599 }, (_, index) => ({ id: `edge:${index}`, source: `memory:${String(index).padStart(4, "0")}`, target: `memory:${String(index + 1).padStart(4, "0")}`, type: "SEMANTICALLY_RELATED" as const, origin: "DETERMINISTIC_TFIDF" as const, confidence: 0.5, evidence: "Shared terms." }));
+    const app = await memoryGraphApp(true, new InMemorySpaceStore(), false, undefined, { graphSnapshot });
+    const url = "/api/admin/memory/graph/overview";
+
+    const full = await app.inject({ method: "GET", url: `${url}?limit=50000`, headers: { cookie } });
+    expect(full.statusCode).toBe(200);
+    expect(full.json().data).toMatchObject({ totalMatchingNodes: 2600, totalMatchingEdges: 2599, truncated: false });
+    expect(full.json().data.nodes).toHaveLength(2600);
+    expect(full.json().data.edges).toHaveLength(2599);
+    expect(JSON.stringify(full.json().data.nodes)).not.toContain("raw-node-value");
+
+    const partial = await app.inject({ method: "GET", url: `${url}?limit=2300`, headers: { cookie } });
+    expect(partial.json().data.nodes).toHaveLength(2300);
+    expect(partial.json().data.truncated).toBe(true);
+
+    const fallback = await app.inject({ method: "GET", url, headers: { cookie } });
+    expect(fallback.json().data.nodes).toHaveLength(2000);
+    expect(fallback.json().data.edges.length).toBeLessThanOrEqual(6000);
+
+    for (const limit of ["50001", "0", "abc"]) {
+      const rejected = await app.inject({ method: "GET", url: `${url}?limit=${limit}`, headers: { cookie } });
+      expect(rejected.statusCode).toBe(400);
+    }
+    const anonymous = await app.inject({ method: "GET", url: `${url}?limit=50000` });
+    expect(anonymous.statusCode).toBe(401);
+    await app.close();
+  });
+
   it("serves the all-months archive and single-month filtering through the month query param", async () => {
     const graphSnapshot = snapshot() as MemoryGraphSnapshot;
     const archiveSnapshot = snapshot() as MemoryGraphSnapshot;

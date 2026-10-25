@@ -9,6 +9,8 @@ export const memorySourceMonth = (node: MemoryGraphNode) => node.sourcePath?.mat
 export const memoryMonthLabel = (month: string) => new Date(`${month}-01T00:00:00Z`).toLocaleDateString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
 export const MIN_ATLAS_TAG_COUNT = 10;
+// Same ordering as localeCompare; a shared collator keeps sorting 50k ids off the long-task path.
+const compareIds = new Intl.Collator().compare;
 
 /** Colors and labels describe real taxonomy or canonical source months; links are never invented. */
 export function createMemoryAtlas(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[], computeLayout = true, minTagCount = MIN_ATLAS_TAG_COUNT) {
@@ -22,7 +24,7 @@ export function createMemoryAtlas(nodes: MemoryGraphNode[], edges: MemoryGraphEd
     topicMembers.get(edge.target)!.add(edge.source);
   }
   const topics = nodes.filter(node => node.type === "TOPIC" && (explicit.has(node.id) ? (topicMembers.get(node.id)?.size ?? 0) >= minTagCount : (topicMembers.get(node.id)?.size ?? 0) >= 2))
-    .sort((a, b) => Number(explicit.has(b.id)) - Number(explicit.has(a.id)) || (topicMembers.get(b.id)?.size ?? 0) - (topicMembers.get(a.id)?.size ?? 0) || a.id.localeCompare(b.id));
+    .sort((a, b) => Number(explicit.has(b.id)) - Number(explicit.has(a.id)) || (topicMembers.get(b.id)?.size ?? 0) - (topicMembers.get(a.id)?.size ?? 0) || compareIds(a.id, b.id));
   // Near-identical tags should not consume every color in the overview.
   const anchors: MemoryGraphNode[] = [];
   for (const topic of topics) {
@@ -77,7 +79,7 @@ export function createMemoryAtlas(nodes: MemoryGraphNode[], edges: MemoryGraphEd
     if (!groupInfo.has(group)) groupInfo.set(group, { label: month ? "Other months" : "Other knowledge", kind: "archive" });
   }
   const buckets = new Map<string, MemoryGraphNode[]>();
-  for (const node of [...visibleNodes].sort((a, b) => a.id.localeCompare(b.id))) {
+  for (const node of [...visibleNodes].sort((a, b) => compareIds(a.id, b.id))) {
     const group = assignments.get(node.id)!;
     if (!buckets.has(group)) buckets.set(group, []);
     buckets.get(group)!.push(node);
